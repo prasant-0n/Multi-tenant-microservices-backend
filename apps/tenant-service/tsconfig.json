@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "../../dist/apps/tenant-service",
+    "tsBuildInfoFile": "../../dist/apps/tenant-service/.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "references": [{ "path": "../../libs/tenancy" }]
+}
