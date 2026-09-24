@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: multitenant-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: multitenant
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d multitenant"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: multitenant-redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tenant-service:
+    build:
+      context: .
+      args:
+        APP: tenant-service
+    container_name: multitenant-tenant
+    environment:
+      PORT: 3001
+      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/multitenant
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "node -r ./register-paths.js dist/apps/tenant-service/migration-run.js
+      && node -r ./register-paths.js dist/apps/tenant-service/main.js"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    expose:
+      - "3001"
+
+  user-service:
+    build:
+      context: .
+      args:
+        APP: user-service
+    container_name: multitenant-user
+    environment:
+      PORT: 3002
+      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/multitenant
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      REDIS_URL: redis://redis:6379
+      TENANT_SERVICE_URL: http://tenant-service:3001
+    depends_on:
+      - tenant-service
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    expose:
+      - "3002"
+
+  gateway:
+    build:
+      context: .
+      args:
+        APP: gateway
+    container_name: multitenant-gateway
+    environment:
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      REDIS_URL: redis://redis:6379
+      TENANT_SERVICE_URL: http://tenant-service:3001
+      USER_SERVICE_URL: http://user-service:3002
+      RATE_LIMIT_TTL_MS: 60000
+      RATE_LIMIT_MAX: 120
+      ENABLE_CORS: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      tenant-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
