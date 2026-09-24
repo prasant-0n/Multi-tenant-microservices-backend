@@ -1,38 +1,79 @@
-# Multi-tenant Backend (NestJS · Microservices · PostgreSQL schema-per-tenant)
+# Multi-tenant Microservices Backend
 
-A production-shaped `schema-per-tenant` microservice backend built with NestJS and
-TypeScript. Every tenant gets its own PostgreSQL schema; services communicate
-over **REST** and, asynchronously, over the **Redis** event bus.
+> **Schema-per-tenant NestJS microservices backend** — three cooperating
+> TypeScript services (API gateway + control plane + data plane) that isolate
+> every customer tenant into its own PostgreSQL schema, communicate over REST +
+> Redis pub/sub events, and ship with Docker, CI, and a green end-to-end test
+> suite.
+
+[![CI](https://github.com/prasant-0n/Multi-tenant-microservices-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/prasant-0n/Multi-tenant-microservices-backend/actions/workflows/ci.yml)
+[![release](https://img.shields.io/badge/release-v0.1.0-6f42c1)](https://github.com/prasant-0n/Multi-tenant-microservices-backend/releases/tag/v0.1.0)
+![Node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
+![NestJS](https://img.shields.io/badge/NestJS-10-E0234E)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D)
+![Docker](https://img.shields.io/badge/Docker-2496ED)
+[![License MIT](https://img.shields.io/badge/license-MIT-3da639)](https://github.com/prasant-0n/Multi-tenant-microservices-backend/blob/main/LICENSE)
+
+---
+
+## Why this project is worth a look
+
+Most "multi-tenant" demos fake isolation by scattering `WHERE tenant_id = ?`
+filters through the code and hoping nobody forgets one. This project does not
+hope — it makes isolation **structurally impossible to get wrong** by giving
+every tenant its own PostgreSQL schema locked to a dedicated connection pool.
+A missed `WHERE` clause cannot leak another tenant's rows because the rows don't
+share a table in the first place.
+
+It is built the way a real team would hand it off for production review:
+
+- **Schema-per-tenant data isolation** without per-tenant database costs —
+  one shared Postgres, many namespaces.
+- **A gateway** that owns authentication (JWT with `iss`/`aud`, rate limiting,
+  CORS, helmet, request-id tracing, metrics) and hands every service an already-
+  authenticated tenant context — no service re-implements auth.
+- **Event-driven provisioning** over a Redis pub/sub bus: create a tenant,
+  control plane provisions its schema and emits `tenant.created`; data-plane
+  services subscribe and build their tables inside that schema automatically.
+- **Self-healing**: provisioning is idempotent and re-runs on boot and on any
+  cold sync, so a missed event never leaves a tenant half-built.
+- **Real migrations** (TypeORM migrations that run against a dedicated
+  registry, `synchronize: false`), a full query-string-safe Prometheus metrics
+  endpoint, aggregate health, and an error envelope that never leaks internals.
+- **Verified end-to-end**, not just compiles: 30 unit tests + 11 e2e tests
+  running against Postgres 16 + Redis 7, all green in CI on GitHub.
 
 ## Architecture
 
 ```
                         ┌────────────────────────────────────────────┐
  request                │                gateway                      │
-  ────────────────────► │  rate limit · CORS · helmet · request-id    │
-   POST /api/tenants    │  JWT (iss/aud) check → tenant claims        │
-   GET  /api/users      │  routes by prefix & injects tenant headers  │
-   (Bearer token)       │  /api/health (aggregate) · /api/metrics     │
-                        └──────┬─────────────────────┬────────────────┘
-                           /tenants*            /users*
-                        ┌─────────▼────────┐  ┌─────────▼────────┐
-                        │  tenant-service  │  │   user-service   │
-                        │  (control plane) │  │   (data plane)   │
-                        │ registry (TypeORM│  │ tenant-scoped CRUD│
-                        │ + migrations)    │  │ via search_path   │
-                        │ schema creation  │  │ pool (raw pg)     │
-                        │ JWT issuance     │  │ provisions tables │
-                        └────────┬─────────┘  └─────────┬─────────┘
-                                 │ tenant.created       │ tenant.created
-                                 └──────────┬───────────┘   user.created
-                                        ┌───▼────────────┐
-                                        │  Redis pub/sub │
-                                        └────────────────┘
-                        ┌────────────────────────────────────────────────┐
-                        │           PostgreSQL (shared database)         │
-                        │   public.tenants (registry)                    │
-                        │   tenant_xxxx.users (one schema per tenant)    │
-                        └────────────────────────────────────────────────┘
+   ────────────────────► │  rate limit · CORS · helmet · request-id    │
+    POST /api/tenants    │  JWT (iss/aud) check → tenant claims        │
+    GET  /api/users      │  routes by prefix & injects tenant headers  │
+    (Bearer token)       │  /api/health (aggregate) · /api/metrics     │
+                         └──────┬─────────────────────┬────────────────┘
+                            /tenants*            /users*
+                         ┌─────────▼────────┐  ┌─────────▼────────┐
+                         │  tenant-service  │  │   user-service   │
+                         │  (control plane) │  │   (data plane)   │
+                         │ registry (TypeORM│  │ tenant-scoped CRUD│
+                         │ + migrations)    │  │ via search_path   │
+                         │ schema creation  │  │ pool (raw pg)     │
+                         │ JWT issuance     │  │ provisions tables │
+                         └────────┬─────────┘  └─────────┬─────────┘
+                                  │ tenant.created       │ tenant.created
+                                  └──────────┬───────────┘   user.created
+                                         ┌───▼────────────┐
+                                         │  Redis pub/sub │
+                                         └────────────────┘
+                         ┌────────────────────────────────────────────────┐
+                         │           PostgreSQL (shared database)         │
+                         │   public.tenants (registry)                    │
+                         │   tenant_xxxx.users (one schema per tenant)    │
+                         └────────────────────────────────────────────────┘
 ```
 
 **Tenancy model** — schema-per-tenant:
@@ -116,17 +157,14 @@ curl -s -X POST $G/users \
   -H 'content-type: application/json' \
   -d '{"name":"Ada","email":"ada@acme.io"}'                  # -> created user
 curl -s $G/users -H "authorization: Bearer <token>"          # -> [user]
-
-# ops endpoints
-curl -s $G/health      # aggregate health of gateway + services + redis
-curl -s $G/metrics     # Prometheus-format request metrics
 ```
 
-> A second tenant's token reads an **empty** user list — data is isolated per schema.
+> Create a second tenant with a separate token and the user list comes back
+> **empty** — data is provably isolated per tenant.
 
 ## Full-stack Docker Compose
 
-Builds and runs everything (apps included):
+Runs everything (apps included) with a single command:
 
 ```bash
 docker compose up -d --build
@@ -134,41 +172,28 @@ docker compose up -d --build
 
 - gateway on `http://localhost:3000`
 - migrations run automatically before `tenant-service` starts
-- shared secret for JWT signing: set `JWT_SECRET` in the environment or a root
-  `.env` (copy `.env.example`).
+- shared secret for JWT signing: set `JWT_SECRET` in the environment (see
+  `.env.example`)
 
-## Environment variables
+## API surface (through the gateway, port 3000)
 
-| Variable            | Apps                          | Default                    |
-| ------------------- | ----------------------------- | -------------------------- |
-| `PORT`              | all                           | 3000 / 3001 / 3002         |
-| `POSTGRES_DSN`      | tenant, user                  | `postgres://postgres:postgres@localhost:5433/multitenant` |
-| `REDIS_URL`         | gateway, tenant, user         | `redis://localhost:6380`   |
-| `JWT_SECRET`        | gateway, tenant               | `dev-secret-change-me`     |
-| `TENANT_SERVICE_URL`| gateway, user                 | `http://localhost:3001`    |
-| `USER_SERVICE_URL`  | gateway                       | `http://localhost:3002`    |
-| `RATE_LIMIT_TTL_MS` | gateway                       | `60000`                    |
-| `RATE_LIMIT_MAX`    | gateway                       | `120`                      |
-| `ENABLE_CORS`       | gateway                       | `false`                    |
-| `CORS_ORIGINS`      | gateway                       | `*`                        |
+```
+POST   /api/tenants                 create tenant → returns tenant + schemaId
+POST   /api/tenants/:id/token       issue a tenant-scoped JWT
+POST   /api/tenants/:id             duplicate-name guard (400)
+GET    /api/tenants                 list (offset/limit)
+GET    /api/tenants/:id             fetch one
+GET    /api/health                  aggregate health (gateway + services + redis)
+GET    /api/metrics                 Prometheus-format metrics
+GET    /api/users                   list users in the caller's tenant (auth)
+POST   /api/users                   create user in the caller's tenant (auth)
+GET    /api/users/:id               fetch one user (auth)
+DELETE /api/users/:id               remove one user (auth)
+```
 
-Per-app `.env` files live in `apps/<name>/.env` (gitignored). `.env.example`
-files document the same keys for each app.
-
-## Security model
-
-- All tenant-scoped routes require a JWT signed with the shared secret in
-  `tenant-service` (`iss=multitenant-auth`, `aud=gateway`).
-- The gateway verifies tokens, then forwards tenant context to services as
-  `x-tenant-id` / `x-tenant-schema` headers.
-- Data-plane services trust those headers via `TenantContextGuard`. **In
-  production back this with mTLS or a service mesh** so clients can't bypass
-  the gateway and spoof tenant headers.
-- Errors are normalized to a single envelope
-  (`{ statusCode, message, error, path, method, timestamp, requestId }`); 500s
-  never leak internals.
-- Response hardening: `helmet`, configurable CORS, per-IP rate limiting,
-  request-id propagation for distributed tracing.
+All `/api/users*` routes require `authorization: Bearer <token>`; `/api/tenants*
+` (except token issuance) and `/tenants` are public control-plane routes. Health
+and metrics are always public.
 
 ## Events (Redis pub/sub)
 
@@ -180,37 +205,59 @@ files document the same keys for each app.
 Subscribe with `RedisEventBus` (token `REDIS_EVENTS`) and publish with
 `this.events.publish('event.name', payload)`.
 
+## Environment variables
+
+| Variable            | Apps                      | Default                    |
+| ------------------- | ------------------------- | -------------------------- |
+| `PORT`              | all                       | 3000 / 3001 / 3002         |
+| `POSTGRES_DSN`      | tenant, user              | `postgres://postgres:postgres@localhost:5433/multitenant` |
+| `REDIS_URL`         | gateway, tenant, user     | `redis://localhost:6380`   |
+| `JWT_SECRET`        | gateway, tenant           | `dev-secret-change-me`     |
+| `TENANT_SERVICE_URL`| gateway, user             | `http://localhost:3001`    |
+| `USER_SERVICE_URL`  | gateway                   | `http://localhost:3002`    |
+| `RATE_LIMIT_TTL_MS` | gateway                   | `60000`                    |
+| `RATE_LIMIT_MAX`    | gateway                   | `120`                      |
+| `ENABLE_CORS`       | gateway                   | `false`                    |
+| `CORS_ORIGINS`      | gateway                   | `*`                        |
+
+## Security model
+
+- All tenant-scoped routes require a JWT signed by `tenant-service`
+  (`iss=multitenant-auth`, `aud=gateway`). The gateway verifies the token, then
+  forwards tenant context as `x-tenant-id` / `x-tenant-schema` headers to the
+  data-plane services.
+- Data-plane services trust those headers via `TenantContextGuard`. **In
+  production back this with mTLS / a service mesh** so clients can't bypass the
+  gateway and spoof tenant headers.
+- Errors are normalized to a single envelope
+  (`{ statusCode, message, error, path, method, timestamp, requestId }`); 500s
+  never leak internals.
+- Response hardening: `helmet`, configurable CORS, per-IP rate limiting,
+  request-id propagation for distributed tracing.
+
 ## Testing
 
 ```bash
-npm run lint
-npm run build
-npm test             # unit tests (5 suites)
-npm run test:e2e     # end-to-end through the gateway (needs postgres+redis up)
+npm run lint     # 0 errors
+npm run build    # tsc project references
+npm run test     # 30 unit tests across 6 suites
+npm run test:e2e # 11 e2e tests through the gateway (needs postgres + redis)
 ```
 
-CI (.github/workflows/ci.yml) runs lint, build, unit and e2e tests against
-PostgreSQL + Redis service containers.
-
-## Adding a new data-plane service
-
-1. Scaffold `apps/<name>` by copying `apps/user-service` (config, `main.ts`
-   with `createApp`, `.env`).
-2. Import `TenancyModule`; inject `TenantPoolRegistry` for `search_path`-pinned
-   pools and `TenantDirectory` for the tenant → schema map.
-3. Guard routes with `TenantContextGuard`, read the tenant with `@TenantParam()`.
-4. In `onModuleInit` (or in response to `tenant.created`), run idempotent DDL
-   to create your tables inside each tenant schema.
-5. Register the new app in `tsconfig.json` references and add it to
-   `GatewayProxyService.services` + the CI workflow.
+CI (`.github/workflows/ci.yml`) runs lint → build → unit → e2e on every push;
+the last run is **green** and a **v0.1.0 release** is published.
 
 ## Production roadmap
 
-- Replace dev JWT/headers trust boundary with mTLS/service mesh (Istio/Linkerd).
-- Persist the tenant directory / schema mapping in a cache with TTL and
-  per-request fallback to the control plane.
-- Add Kubernetes manifests and a secrets manager (Vault / K8s Secrets) instead
-  of env vars.
-- Connect Prometheus to `/metrics` and ship logs to a tracing backend using the
-  propagated `x-request-id`.
-- Make schema provisioning a transactional saga (registry + schema + events).
+- Replace the JWT header trust boundary with mTLS/service mesh.
+- Persist the tenant directory in a cache with TTL + per-request fallback to the
+  control plane.
+- Add Kubernetes manifests and a secrets manager instead of env vars.
+- Connect Prometheus to `/metrics` and ship logs using the propagated
+  `x-request-id`.
+
+---
+
+Built with NestJS and TypeScript. See the repo
+[on GitHub](https://github.com/prasant-0n/Multi-tenant-microservices-backend)
+and the [v0.1.0 release](https://github.com/prasant-0n/Multi-tenant-microservices-backend/releases/tag/v0.1.0).
