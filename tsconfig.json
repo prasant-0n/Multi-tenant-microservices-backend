@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2021",
+    "lib": ["ES2021"],
+    "moduleResolution": "node",
+    "baseUrl": "./",
+    "outDir": "./dist",
+    "declaration": true,
+    "removeComments": true,
+    "sourceMap": true,
+    "incremental": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "resolveJsonModule": true,
+    "paths": {
+      "@app/tenancy": ["libs/tenancy/src/index.ts"],
+      "@app/tenancy/*": ["libs/tenancy/src/*"]
+    }
+  },
+  "files": [],
+  "references": [
+    { "path": "./libs/tenancy" },
+    { "path": "./apps/gateway" },
+    { "path": "./apps/tenant-service" },
+    { "path": "./apps/user-service" }
+  ]
+}
